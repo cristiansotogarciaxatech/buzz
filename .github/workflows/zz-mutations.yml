@@ -1,0 +1,68 @@
+name: Mutations (scratch)
+
+# Scratch workflow, fork-only, never merged. Breaks the sweep on purpose and
+# asserts the tests notice. A test suite that passes proves nothing on its own;
+# this is what proves the coverage is causal.
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Baseline is green
+        run: cargo test -p buzz-dev-mcp -- --test-threads=4
+
+      - name: 'Mutation 1: a busy registry authorizes deletion'
+        run: |
+          set -euo pipefail
+          git checkout -- crates
+          sed -i 's/&& matches!(commands, CommandsState::Idle)/\&\& matches!(commands, CommandsState::Idle | CommandsState::Busy)/' crates/buzz-dev-mcp/src/sweep.rs
+          git diff --quiet && { echo "::error::mutation did not apply"; exit 1; }
+          set +e
+          cargo test -p buzz-dev-mcp --lib -- sweep::tests > out.log 2>&1
+          rc=$?
+          set -e
+          grep -E "test result:" out.log || true
+          if [ $rc -eq 0 ]; then echo "::error::mutation survived"; exit 1; fi
+          grep -E "^test sweep::tests::.* FAILED" out.log | head -20
+
+      - name: 'Mutation 2: commands are never registered'
+        run: |
+          set -euo pipefail
+          git checkout -- crates
+          sed -i 's|let mut paths = Vec::with_capacity(dirs.len());|let mut paths = Vec::with_capacity(dirs.len()); let dirs: \&[\&Path] = \&[];|' crates/buzz-dev-mcp/src/sweep.rs
+          git diff --quiet && { echo "::error::mutation did not apply"; exit 1; }
+          set +e
+          cargo test -p buzz-dev-mcp --test startup_sweep > out.log 2>&1
+          rc=$?
+          set -e
+          grep -E "test result:" out.log || true
+          if [ $rc -eq 0 ]; then echo "::error::mutation survived"; exit 1; fi
+          grep -E "panicked at|deleted .* while a command" out.log | head -10
+
+      - name: 'Mutation 3: liveness asks about the pid, not the group'
+        run: |
+          set -euo pipefail
+          git checkout -- crates
+          sed -i 's|    use nix::sys::signal::killpg;|    use nix::sys::signal::kill;|; s|match killpg(Pid::from_raw(pgid as i32), None)|match kill(Pid::from_raw(pgid as i32), None)|' crates/buzz-dev-mcp/src/sweep.rs
+          git diff --quiet && { echo "::error::mutation did not apply"; exit 1; }
+          set +e
+          cargo test -p buzz-dev-mcp --lib -- sweep::tests > out.log 2>&1
+          rc=$?
+          set -e
+          grep -E "test result:" out.log || true
+          if [ $rc -eq 0 ]; then echo "::error::mutation survived"; exit 1; fi
+          grep -E "^test sweep::tests::.* FAILED" out.log | head -20
+
+      - name: Tree is back to the real thing
+        run: |
+          git checkout -- crates
+          git diff --quiet
