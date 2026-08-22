@@ -1,0 +1,35 @@
+name: buzz-cli verify (scratch)
+
+# Scratch workflow. Lives only on the ci/verify-cli-* branches of the fork so
+# the mention-preflight tests can be executed on Linux, macOS and Windows,
+# which the development machine cannot do. Never merged, never part of the PR.
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  cli:
+    name: buzz-cli tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # hermit is a Unix-only launcher; the Windows runner uses its own
+      # preinstalled rustup, which honours rust-toolchain.toml all the same.
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+        if: runner.os != 'Windows'
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Toolchain
+        run: |
+          cargo --version
+          rustc --version --verbose
+      - name: Tests
+        run: cargo test -p buzz-cli -- --test-threads=4
+      - name: Clippy
+        if: always()
+        run: cargo clippy -p buzz-cli --all-targets -- -D warnings

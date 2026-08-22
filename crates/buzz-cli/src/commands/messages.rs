@@ -1056,21 +1056,28 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        match_profiles_by_name, merge_message_mentions, missing_members,
+        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
         resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        CliError, SendMessageParams, Uuid,
     };
+    use crate::error::is_retryable_error;
+    use axum::body::Body;
+    use axum::http::{Response, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
     use nostr::Keys;
     use serde_json::json;
+    use tokio::net::TcpListener;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const CHANNEL: &str = "123e4567-e89b-12d3-a456-426614174000";
 
     // Three real pubkeys (lowercase 64-char hex) used by parse_member_pubkeys tests.
     // See the test's own comment on what `PublicKey::from_hex` actually validates.
@@ -1193,7 +1200,7 @@ mod tests {
 
     #[test]
     fn reply_only_falls_back_to_reply_target() {
-        // Direct reply to a top-level message — the parent's only e-tag is a
+        // Direct reply to a top-level message â€” the parent's only e-tag is a
         // "reply" marker pointing at it; treat the reply target as the root.
         let tags = json!([["e", ID_B, "", "reply"], ["p", PUBKEY],]);
         assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_B));
@@ -1250,13 +1257,13 @@ mod tests {
     }
 
     //
-    // These tests don't hit the network — they prove that *given* the
+    // These tests don't hit the network â€” they prove that *given* the
     // events the relay returns, the CLI's parse + match wiring produces
     // the right pubkeys. The async I/O wrapper around them is one
     // straight line; the pure stages it composes are exercised here and
     // in buzz-sdk.
 
-    /// End-to-end (sans I/O): body text → extracted names → matched
+    /// End-to-end (sans I/O): body text â†’ extracted names â†’ matched
     /// member pubkeys, using realistic 39002 + kind:0 event JSON.
     /// This is the regression guard for the previous stub that always
     /// returned `vec![]`.
@@ -1349,7 +1356,7 @@ mod tests {
 
     #[test]
     fn cli_pipeline_returns_empty_when_no_at_names() {
-        // Sanity: no `@names` in body → no profile match attempt needed.
+        // Sanity: no `@names` in body â†’ no profile match attempt needed.
         let names = extract_at_names("plain message, no mentions");
         assert!(names.is_empty());
     }
@@ -1380,7 +1387,7 @@ mod tests {
         // `PublicKey::from_hex` rejects non-hex and wrong-length inputs and
         // canonicalizes hex case. (Note: it accepts any 64-char x-only hex
         // whose integer value is in field; it does not verify the point is
-        // actually on the curve — same as MCP's behavior.)
+        // actually on the curve â€” same as MCP's behavior.)
         let pk_uppercase: String = PK_VALID_A.to_ascii_uppercase();
         let event = json!({
             "tags": [
@@ -1506,7 +1513,7 @@ mod tests {
     fn author_name_match_is_exact_case_insensitive() {
         let events = vec![
             profile_event(PK_VALID_A, Some("Aaron"), Some("aaron")),
-            // Substring only — NIP-50 may return it, but it must not match.
+            // Substring only â€” NIP-50 may return it, but it must not match.
             profile_event(PK_VALID_B, Some("Aaronson"), None),
         ];
         let matches = match_profiles_by_name(&events, "aArOn");
@@ -1542,5 +1549,174 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    // ---- mention preflight error classification ----
+    //
+    // The preflight only runs when the body carries an `@` or `--mention` was
+    // passed. It used to funnel every relay failure into `CliError::Other`,
+    // which is `retryable:false` and exit code 4, while the very same outage
+    // on a body with no `@` produced `CliError::Network`, `retryable:true` and
+    // exit code 2. One `@` inverted the retry verdict on an identical fault.
+
+    fn send_params(channel_id: &str, content: &str, mentions: Vec<String>) -> SendMessageParams {
+        SendMessageParams {
+            channel_id: channel_id.to_string(),
+            content: content.to_string(),
+            kind: None,
+            reply_to: None,
+            broadcast: false,
+            files: vec![],
+            mentions,
+        }
+    }
+
+    /// Serve one fixed response body on `POST /query`.
+    async fn query_server(status: StatusCode, body: &'static str) -> String {
+        let app = Router::new().route(
+            "/query",
+            post(move || async move {
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn unreachable_client() -> BuzzClient {
+        BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap()
+    }
+
+    /// The regression. An `@` in the body must not change how an unreachable
+    /// relay is classified.
+    #[tokio::test]
+    async fn unreachable_relay_stays_retryable_when_the_body_has_an_at_sign() {
+        let error = cmd_send_message(
+            &unreachable_client(),
+            send_params(CHANNEL, "ping @somebody", vec![]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Network(_)),
+            "an unreachable relay must stay a network error, got {error:?}"
+        );
+        assert!(
+            is_retryable_error(&error),
+            "an unreachable relay is retryable, got {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("membership"),
+            "a dead relay must not be described as a membership problem, got {error}"
+        );
+    }
+
+    /// `--mention` arms the same preflight with no `@` anywhere in the body.
+    #[tokio::test]
+    async fn unreachable_relay_stays_retryable_with_an_explicit_mention() {
+        let error = cmd_send_message(
+            &unreachable_client(),
+            send_params(CHANNEL, "no at sign here", vec![PK_VALID_A.to_string()]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Network(_)),
+            "expected a network error, got {error:?}"
+        );
+        assert!(is_retryable_error(&error));
+    }
+
+    /// The control. Without mentions the preflight is skipped entirely, and
+    /// this is the classification the two tests above have to match.
+    #[tokio::test]
+    async fn unreachable_relay_without_mentions_is_a_retryable_network_error() {
+        let error = cmd_send_message(
+            &unreachable_client(),
+            send_params(CHANNEL, "no mentions at all", vec![]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Network(_)),
+            "expected a network error, got {error:?}"
+        );
+        assert!(is_retryable_error(&error));
+    }
+
+    /// An overloaded relay is retryable too, and the preflight must say so.
+    #[tokio::test]
+    async fn relay_503_during_the_preflight_stays_retryable() {
+        let url = query_server(StatusCode::SERVICE_UNAVAILABLE, "relay is overloaded").await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let error = cmd_send_message(&client, send_params(CHANNEL, "ping @somebody", vec![]))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Relay { status: 503, .. }),
+            "expected relay 503, got {error:?}"
+        );
+        assert!(
+            is_retryable_error(&error),
+            "503 is retryable, got {error:?}"
+        );
+    }
+
+    /// The relay answered. The channel genuinely has no kind 39002 event.
+    /// That is a real membership fact and it gets its own error, separate
+    /// from any lookup failure.
+    #[tokio::test]
+    async fn a_channel_with_no_membership_event_is_reported_as_not_found() {
+        let url = query_server(StatusCode::OK, "[]").await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let error = cmd_send_message(&client, send_params(CHANNEL, "ping @somebody", vec![]))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::NotFound(_)),
+            "expected not found, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains(CHANNEL),
+            "the error must name the channel, got {error}"
+        );
+        assert!(
+            !is_retryable_error(&error),
+            "a missing membership record will not fix itself on retry"
+        );
+    }
+
+    /// A 200 carrying something that is not a JSON array is a real defect
+    /// somewhere, and it must not be mistaken for an empty channel.
+    #[tokio::test]
+    async fn a_non_array_query_response_is_reported_as_a_bad_response() {
+        let url = query_server(StatusCode::OK, r#"{"events":[]}"#).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let error = cmd_send_message(&client, send_params(CHANNEL, "ping @somebody", vec![]))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Other(_)),
+            "expected a generic error, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("not a JSON array"),
+            "the error must say what was wrong with the body, got {error}"
+        );
     }
 }
