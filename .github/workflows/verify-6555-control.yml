@@ -1,0 +1,19 @@
+name: verify-6555-control
+on: push
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rustc version
+        run: rustc --version && cargo --version
+      - name: control run, the new tests against UNFIXED production code
+        continue-on-error: true
+        run: cargo test -p buzz-cli 2>&1 | tee control.log
+      - name: summary
+        run: |
+          echo "---- failures ----"
+          sed -n '/^failures:$/,$p' control.log || true
+          echo "---- result line ----"
+          grep -E '^test result:' control.log || true

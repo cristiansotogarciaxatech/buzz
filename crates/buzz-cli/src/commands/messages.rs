@@ -157,8 +157,6 @@ fn resolve_names_to_pubkeys(
 /// Returns both the current member set and uniquely name-resolved pubkeys.
 /// Lookup failures are fatal when mention processing is requested: publishing
 /// visible mention text without its intended `p` tag is worse than not sending.
-/// Fatal is not the same as unretryable, so the relay's own error is passed
-/// through untouched and the caller keeps its real category and `retryable`.
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
@@ -176,11 +174,9 @@ async fn resolve_content_mentions(
         "limit": 1,
     });
     let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
-        .await?
+        .await
         .ok_or_else(|| {
-            CliError::NotFound(format!(
-                "channel {channel_id} has no membership record (kind 39002) to resolve mentions against"
-            ))
+            CliError::Other("could not load channel membership for mention preflight".into())
         })?;
 
     if !stripped.contains('@') {
@@ -192,7 +188,11 @@ async fn resolve_content_mentions(
         "authors": member_pubkeys,
         "limit": member_pubkeys.len(),
     });
-    let profile_events = fetch_events(client, &profiles_filter).await?;
+    let profile_events = fetch_events(client, &profiles_filter)
+        .await
+        .ok_or_else(|| {
+            CliError::Other("could not load member profiles for mention resolution".into())
+        })?;
 
     let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
@@ -292,34 +292,23 @@ fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
-///
-/// Propagates the relay's own error verbatim. Callers surface whatever this
-/// returns, so discarding the error here would relabel a connect failure,
-/// a 401 or a 503 as something permanent and unretryable.
+/// Returns `None` on any I/O or parse failure.
 async fn fetch_events(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Result<Vec<serde_json::Value>, CliError> {
-    let raw = client.query(filter).await?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    parsed
-        .as_array()
-        .cloned()
-        .ok_or_else(|| CliError::Other("query response was not a JSON array".into()))
+) -> Option<Vec<serde_json::Value>> {
+    let raw = client.query(filter).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.as_array().cloned()
 }
 
 /// Extract member pubkeys (the `p` tag values) from a single 39002 event.
-///
-/// `Err` means the lookup failed. `Ok(None)` means the relay answered and the
-/// channel has no 39002 event, which is a different fact and earns a
-/// different error from the caller.
 async fn fetch_member_pubkeys(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Result<Option<Vec<String>>, CliError> {
+) -> Option<Vec<String>> {
     let events = fetch_events(client, filter).await?;
-    Ok(events.first().map(parse_member_pubkeys))
+    Some(parse_member_pubkeys(events.first()?))
 }
 
 /// Parse member pubkeys from a kind 39002 event JSON value.
