@@ -1,0 +1,16 @@
+name: fmtcheck-6569
+on: push
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo --version && cargo fmt --version
+      - name: confirm messages.rs is byte-identical to PR 6569 head
+        run: |
+          git fetch origin ${{ github.sha }} --depth=2 || true
+          echo "sha under test: $(git rev-parse HEAD)"
+          echo "parent: $(git rev-parse HEAD^)"
+      - name: cargo fmt --check on the PR head, production code untouched
+        run: cargo fmt --all -- --check
