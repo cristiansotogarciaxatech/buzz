@@ -302,7 +302,9 @@ async fn fetch_events(
 ) -> Result<Vec<serde_json::Value>, CliError> {
     let raw = client.query(filter).await?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        CliError::Other(format!("failed to parse query response for mention preflight: {e}"))
+        CliError::Other(format!(
+            "failed to parse query response for mention preflight: {e}"
+        ))
     })?;
     parsed.as_array().cloned().ok_or_else(|| {
         CliError::Other("mention preflight query response was not a JSON array".into())
@@ -1066,21 +1068,20 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        match_profiles_by_name, merge_message_mentions, missing_members,
-        cmd_send_message, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_content_mentions, resolve_names_to_pubkeys, resolve_thread_target,
-        thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient, CliError,
-        SendMessageParams, Uuid,
+        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_content_mentions,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, SendMessageParams, Uuid,
     };
     use crate::error::{exit_code, is_retryable_error};
-    use buzz_sdk::mentions::{
-        extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
-    };
     use axum::body::Body;
     use axum::http::{Response, StatusCode};
     use axum::routing::post;
     use axum::Router;
+    use buzz_sdk::mentions::{
+        extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
+    };
     use nostr::Keys;
     use serde_json::json;
     use tokio::net::TcpListener;
@@ -1125,9 +1126,10 @@ mod tests {
             BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
         let channel = "123e4567-e89b-12d3-a456-426614174000";
 
-        let with_at = resolve_content_mentions(&client, channel, "probe with an @sign in it", false)
-            .await
-            .unwrap_err();
+        let with_at =
+            resolve_content_mentions(&client, channel, "probe with an @sign in it", false)
+                .await
+                .unwrap_err();
         assert!(
             matches!(with_at, CliError::Network(_)),
             "expected Network, got {with_at:?}"
