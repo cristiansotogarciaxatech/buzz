@@ -1,0 +1,17 @@
+name: crosscheck-6569
+on: push
+
+jobs:
+  crosscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustc --version && cargo --version
+      - name: head under test
+        run: git log --oneline -3
+      - name: fmt
+        run: cargo fmt -p buzz-cli -- --check
+      - name: clippy
+        run: cargo clippy -p buzz-cli --all-targets -- -D warnings
+      - name: test
+        run: cargo test -p buzz-cli --lib commands::messages::tests
