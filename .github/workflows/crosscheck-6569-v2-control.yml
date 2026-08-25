@@ -15,4 +15,5 @@ jobs:
           echo "base (unfixed main): $(git rev-parse HEAD^)"
           git diff --name-only HEAD^ HEAD
       - name: the same three tests against unfixed main, must FAIL
-        run: cargo test -p buzz-cli commands::messages::tests:: -- --nocapture
+        run: |
+          cargo test -p buzz-cli commands::messages::tests:: -- --nocapture
