@@ -1,0 +1,21 @@
+name: crosscheck-6569-v2
+on: push
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo --version
+      - name: show delta against PR 6569 head dfcbe232
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          echo "PR head (parent): $(git rev-parse HEAD^)"
+          git diff --stat HEAD^ HEAD
+      - name: the three tests this PR does not have, run against its own logic
+        run: |
+          cargo test -p buzz-cli relay_503_during_the_preflight_stays_retryable -- --exact --nocapture
+          cargo test -p buzz-cli a_channel_with_no_membership_event_is_reported_as_not_found -- --exact --nocapture
+          cargo test -p buzz-cli a_non_array_query_response_is_reported_as_a_bad_response -- --exact --nocapture
+      - name: full buzz-cli suite
+        run: cargo test -p buzz-cli
