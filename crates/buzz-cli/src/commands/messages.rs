@@ -1056,17 +1056,23 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        match_profiles_by_name, merge_message_mentions, missing_members,
+        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
         resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        CliError, SendMessageParams, Uuid,
     };
+    use crate::error::{exit_code, is_retryable_error};
+    use axum::body::Body;
+    use axum::http::{Response, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
     use nostr::Keys;
     use serde_json::json;
+    use tokio::net::TcpListener;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1542,5 +1548,115 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+    // ---- crosscheck: the three behaviour changes this PR ships untested ----
+
+    const XC_CHANNEL: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    fn xc_send_params(channel_id: &str, content: &str, mentions: Vec<String>) -> SendMessageParams {
+        SendMessageParams {
+            channel_id: channel_id.to_string(),
+            content: content.to_string(),
+            kind: None,
+            reply_to: None,
+            broadcast: false,
+            files: vec![],
+            mentions,
+        }
+    }
+
+    /// Serve one fixed response body on `POST /query`.
+    async fn xc_query_server(status: StatusCode, body: &'static str) -> String {
+        let app = Router::new().route(
+            "/query",
+            post(move || async move {
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// An overloaded relay is retryable too, and the preflight must say so.
+    #[tokio::test]
+    async fn relay_503_during_the_preflight_stays_retryable() {
+        let url = xc_query_server(StatusCode::SERVICE_UNAVAILABLE, "relay is overloaded").await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let error = cmd_send_message(
+            &client,
+            xc_send_params(XC_CHANNEL, "ping @somebody", vec![]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Relay { status: 503, .. }),
+            "expected relay 503, got {error:?}"
+        );
+        assert!(
+            is_retryable_error(&error),
+            "503 is retryable, got {error:?}"
+        );
+        assert_eq!(exit_code(&error), 2);
+    }
+
+    /// The relay answered. The channel genuinely has no kind 39002 event.
+    #[tokio::test]
+    async fn a_channel_with_no_membership_event_is_reported_as_not_found() {
+        let url = xc_query_server(StatusCode::OK, "[]").await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let error = cmd_send_message(
+            &client,
+            xc_send_params(XC_CHANNEL, "ping @somebody", vec![]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::NotFound(_)),
+            "expected not found, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains(XC_CHANNEL),
+            "the error must name the channel, got {error}"
+        );
+        assert!(
+            !is_retryable_error(&error),
+            "a missing membership record will not fix itself on retry"
+        );
+        assert_eq!(exit_code(&error), 1);
+    }
+
+    /// A 200 carrying something that is not a JSON array must not be mistaken
+    /// for an empty channel.
+    #[tokio::test]
+    async fn a_non_array_query_response_is_reported_as_a_bad_response() {
+        let url = xc_query_server(StatusCode::OK, r#"{"events":[]}"#).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let error = cmd_send_message(
+            &client,
+            xc_send_params(XC_CHANNEL, "ping @somebody", vec![]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::Other(_)),
+            "expected a generic error, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("not a JSON array"),
+            "the error must say what was wrong with the body, got {error}"
+        );
+        assert_eq!(exit_code(&error), 4);
     }
 }

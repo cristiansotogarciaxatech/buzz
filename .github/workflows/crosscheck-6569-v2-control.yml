@@ -1,0 +1,18 @@
+name: crosscheck-6569-v2-control
+on: push
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - run: cargo --version
+      - name: this is a CONTROL, it is expected to be RED
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          echo "base (unfixed main): $(git rev-parse HEAD^)"
+          git diff --name-only HEAD^ HEAD
+      - name: the same three tests against unfixed main, must FAIL
+        run: cargo test -p buzz-cli commands::messages::tests:: -- --nocapture
