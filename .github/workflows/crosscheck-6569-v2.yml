@@ -6,6 +6,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - run: cargo --version
       - name: show delta against PR 6569 head dfcbe232
         run: |
