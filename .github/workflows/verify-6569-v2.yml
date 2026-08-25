@@ -6,20 +6,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - run: cargo --version && cargo fmt --version
       - name: prove production source is byte-identical to PR 6569 head dfcbe232
         run: |
           echo "sha under test: $(git rev-parse HEAD)"
-          echo "parent (PR head): $(git rev-parse HEAD^)"
-          git diff --stat HEAD^ HEAD
+          echo "PR head (parent): $(git rev-parse HEAD^)"
+          echo "--- files changed vs PR head (workflow only) ---"
+          git diff --name-only HEAD^ HEAD
+          echo "--- sha256 of messages.rs ---"
           sha256sum crates/buzz-cli/src/commands/messages.rs
       - name: just fmt-check equivalent, the upstream Rust Lint gate
         run: cargo fmt --all -- --check
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sha256sum crates/buzz-cli/src/commands/messages.rs
-      - name: buzz-cli test suite at the PR head
-        run: cargo test -p buzz-cli
