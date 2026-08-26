@@ -1,0 +1,40 @@
+name: verify-6569-v3
+on: push
+
+jobs:
+  fmt-at-pr-head:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: toolchain actually in use
+        run: |
+          cat rust-toolchain.toml
+          cargo --version
+          cargo fmt --version
+      - name: prove production source is byte-identical to PR 6569 head ae104d8e
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          echo "PR head (parent): $(git rev-parse HEAD^)"
+          echo "--- files changed vs PR head (workflow file only) ---"
+          git diff --name-only HEAD^ HEAD
+          echo "--- sha256 of messages.rs ---"
+          sha256sum crates/buzz-cli/src/commands/messages.rs
+      - name: just fmt-check, the exact upstream Rust Lint gate
+        run: just fmt-check
+
+  control-upstream-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: block/buzz
+          ref: main
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: control, upstream main must be fmt-clean
+        run: |
+          echo "main sha: $(git rev-parse HEAD)"
+          sha256sum crates/buzz-cli/src/commands/messages.rs
+          just fmt-check
