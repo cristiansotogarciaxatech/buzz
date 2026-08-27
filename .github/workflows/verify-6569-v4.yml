@@ -1,0 +1,75 @@
+name: verify-6569-v4
+on: push
+
+jobs:
+  head-207dc350:
+    name: PR 6569 head, real gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: toolchain actually in use
+        run: |
+          cat rust-toolchain.toml
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: prove the tree is PR head 207dc350 plus one workflow file
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          echo "PR head (parent): $(git rev-parse HEAD^)"
+          echo "--- files changed vs PR head ---"
+          git diff --name-only HEAD^ HEAD
+          echo "--- sha256 of messages.rs ---"
+          sha256sum crates/buzz-cli/src/commands/messages.rs
+      - name: just fmt-check (upstream Rust Lint step 1)
+        run: just fmt-check
+      - name: clippy on the crate the diff touches (upstream Rust Lint step 3, scoped)
+        run: cargo clippy -p buzz-cli --all-targets -- -D warnings
+      - name: cargo nextest run -p buzz-cli (exactly what just test-unit runs)
+        run: |
+          cargo install cargo-nextest --locked --version 0.9.136 || true
+          cargo nextest run -p buzz-cli
+      - name: count the messages tests specifically
+        run: cargo nextest run -p buzz-cli --lib -E 'test(commands::messages::tests)'
+
+  armcheck-ae104d8e:
+    name: arm-check, the old head must still fail fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: olympusbuildz/buzz
+          ref: ae104d8e
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: fmt-check must FAIL here, otherwise the instrument proves nothing
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          sha256sum crates/buzz-cli/src/commands/messages.rs
+          if just fmt-check; then
+            echo "ARMCHECK UNEXPECTED PASS, the gate is not detecting the known-bad head"
+            exit 1
+          else
+            echo "ARMCHECK FAILED AS EXPECTED, the gate is live"
+          fi
+
+  control-main:
+    name: control, upstream main
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: block/buzz
+          ref: main
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: upstream main must be fmt and clippy clean on the same runner
+        run: |
+          echo "main sha: $(git rev-parse HEAD)"
+          sha256sum crates/buzz-cli/src/commands/messages.rs
+          just fmt-check
+          cargo clippy -p buzz-cli --all-targets -- -D warnings
