@@ -1,0 +1,28 @@
+name: armcheck-6569
+on: push
+
+jobs:
+  armcheck-old-head:
+    name: arm-check, superseded head ae104d8e must still fail fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: what is under test
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          echo "superseded PR head (parent): $(git rev-parse HEAD^)"
+          git diff --name-only HEAD^ HEAD
+          sha256sum crates/buzz-cli/src/commands/messages.rs
+          cargo fmt --version
+      - name: fmt-check must FAIL here, otherwise a green result proves nothing
+        run: |
+          if just fmt-check; then
+            echo "ARMCHECK UNEXPECTED PASS, the gate does not detect the known-bad head"
+            exit 1
+          else
+            echo "ARMCHECK FAILED AS EXPECTED, the gate is live"
+          fi
