@@ -1,9 +1,11 @@
 packages:
+  - services/*
   - "desktop"
   - "web"
   - "admin-web"
 allowBuilds:
   esbuild: true
+  onnxruntime-node: true
 overrides:
   # Force a single copy of the dismissable-layer. Radix packages otherwise
   # resolve different versions (react-menu pulled 1.1.11, react-dialog 1.1.15),
