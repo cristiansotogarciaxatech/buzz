@@ -1,0 +1,33 @@
+{
+  "name": "@buzz/mastra-memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "pnpm run typecheck && pnpm run test",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "2.0.3",
+    "@mastra/core": "1.63.2",
+    "@mastra/fastembed": "1.3.0",
+    "@mastra/memory": "1.28.1",
+    "@mastra/pg": "1.22.2",
+    "@openai/codex-sdk": "0.151.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@mastra/libsql": "1.22.2",
+    "@types/node": "25.6.0",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}
