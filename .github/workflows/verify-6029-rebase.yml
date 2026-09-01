@@ -1,0 +1,34 @@
+name: verify-6029-rebase
+on: push
+
+jobs:
+  rebased:
+    name: 6029 rebased onto main, real gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: toolchain actually in use
+        run: |
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: prove the dev-mcp sources are untouched by the rebase
+        run: |
+          echo "sha under test: $(git rev-parse HEAD)"
+          for f in crates/buzz-dev-mcp/Cargo.toml crates/buzz-dev-mcp/src/lib.rs \
+                   crates/buzz-dev-mcp/src/shell.rs crates/buzz-dev-mcp/src/shim.rs \
+                   crates/buzz-dev-mcp/src/sweep.rs crates/buzz-dev-mcp/tests/startup_sweep.rs; do
+            echo "$(sha256sum "$f")"
+          done
+      - name: just fmt-check
+        run: just fmt-check
+      - name: clippy on buzz-dev-mcp
+        run: cargo clippy -p buzz-dev-mcp --all-targets -- -D warnings
+      - name: the Unix half this PR exists to cover
+        run: |
+          cargo install cargo-nextest --locked --version 0.9.136 || true
+          cargo nextest run -p buzz-dev-mcp
