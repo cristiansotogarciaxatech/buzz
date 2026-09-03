@@ -27,6 +27,15 @@ describe("Mastra persistent project memory", () => {
     runtime = await openRuntime(databaseUrl);
   });
 
+  // LibSQL resolves close() in under a millisecond, but on Windows the SQLite
+  // file handles outlive it, so the temp-directory removal below retries against
+  // a locked file. Measured over 8 runs on this host: close 0ms every time, rm
+  // 122ms to 15151ms. Vitest's default 10s hook ceiling sits inside that range,
+  // which is the whole flake. The removal always succeeds eventually, so give the
+  // hook room for the observed worst case rather than making cleanup non-fatal --
+  // a genuine handle leak should still fail the suite.
+  const TEARDOWN_TIMEOUT_MS = 60_000;
+
   afterAll(async () => {
     await runtime?.backend.close();
     await rm(directory, {
@@ -35,7 +44,7 @@ describe("Mastra persistent project memory", () => {
       maxRetries: 10,
       retryDelay: 100,
     });
-  });
+  }, TEARDOWN_TIMEOUT_MS);
 
   it("uses Mastra's built-in Observer and Reflector", async () => {
     const engine = await runtime.memory.omEngine;
