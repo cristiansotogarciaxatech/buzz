@@ -138,6 +138,59 @@ fn build_initialize_params() -> serde_json::Value {
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
+/// What the agent said and did during one turn, bounded at capture time.
+#[derive(Debug, Default, Clone)]
+pub struct TurnTranscript {
+    /// Concatenated agent message chunks, truncated at `TRANSCRIPT_MAX_CHARS`.
+    pub text: String,
+    /// `(tool name, terminal status)` pairs, capped at `TRANSCRIPT_MAX_TOOLS`.
+    ///
+    /// Names and statuses only. Tool arguments and tool output never enter
+    /// this struct, so nothing here can carry file contents or credentials
+    /// into an outbound memory write.
+    pub tools: Vec<(String, String)>,
+    /// True when either cap discarded something, so a consumer can say the
+    /// record is partial instead of presenting a clipped turn as complete.
+    pub truncated: bool,
+}
+
+/// Chosen to sit under the sidecar's own 65536-char per-message bound with
+/// room to spare, so truncation is visible here rather than silently at the
+/// far end where nothing would mark it.
+const TRANSCRIPT_MAX_CHARS: usize = 32_768;
+/// A turn running more tools than this is not one the summary layer can
+/// usefully describe anyway.
+const TRANSCRIPT_MAX_TOOLS: usize = 64;
+
+impl TurnTranscript {
+    fn push_text(&mut self, chunk: &str) {
+        if self.text.chars().count() >= TRANSCRIPT_MAX_CHARS {
+            self.truncated = true;
+            return;
+        }
+        let room = TRANSCRIPT_MAX_CHARS - self.text.chars().count();
+        if chunk.chars().count() > room {
+            self.text.extend(chunk.chars().take(room));
+            self.truncated = true;
+        } else {
+            self.text.push_str(chunk);
+        }
+    }
+
+    fn push_tool(&mut self, name: &str, status: &str) {
+        if self.tools.len() >= TRANSCRIPT_MAX_TOOLS {
+            self.truncated = true;
+            return;
+        }
+        self.tools.push((name.to_string(), status.to_string()));
+    }
+
+    /// True when there is nothing worth persisting.
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.tools.is_empty()
+    }
+}
+
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
@@ -212,6 +265,13 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
+    /// Bounded record of what the agent said and which tools it ran this turn.
+    ///
+    /// Only populated to feed the optional memory sidecar. Both halves are
+    /// capped here at the source rather than at the send, so a runaway turn
+    /// cannot grow this without bound in memory even when no sidecar is
+    /// configured to drain it.
+    turn_transcript: TurnTranscript,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
 }
@@ -562,6 +622,7 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
+            turn_transcript: TurnTranscript::default(),
             standard_adapter,
         })
     }
@@ -884,6 +945,14 @@ impl AcpClient {
     /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
     /// exclusive cumulative path; standard ACP prompt usage is used only when
     /// goose emitted nothing for this turn.
+    /// Consume this turn's bounded transcript for the memory sidecar.
+    ///
+    /// Always taken, never peeked, so a turn's record cannot leak into the
+    /// next turn's write if the caller skips a send.
+    pub fn take_turn_transcript(&mut self) -> TurnTranscript {
+        std::mem::take(&mut self.turn_transcript)
+    }
+
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
@@ -1756,6 +1825,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.turn_transcript.push_text(text);
                 }
                 false
             }
@@ -1778,6 +1848,16 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                // Terminal statuses only. An in-flight update would record a
+                // tool that may still fail, and "ran a tool" is not the same
+                // claim as "the tool succeeded".
+                if matches!(status, "completed" | "failed") {
+                    let name = update
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(tool_id);
+                    self.turn_transcript.push_tool(name, status);
+                }
                 false
             }
             "plan" => {

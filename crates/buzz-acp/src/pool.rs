@@ -2614,6 +2614,10 @@ pub async fn run_prompt_task(
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    // Set when a sidecar scope resolved for this turn, so the post-turn write
+    // reuses the exact scope the pre-turn read used.
+    let mut mastra_write_scope: Option<(crate::mastra_memory::MemoryScope, String)> = None;
+
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -2720,6 +2724,23 @@ pub async fn run_prompt_task(
                     &ctx.agent_keys.public_key().to_hex(),
                     &session_id,
                 );
+                let scope = match scope {
+                    Some(resolved) => {
+                        // Keep the resolved scope and the turn's trigger text
+                        // for the write-back after the turn succeeds. Deriving
+                        // it once means the read and the write can never
+                        // disagree about which project this turn belongs to.
+                        mastra_write_scope = Some((
+                            resolved.clone(),
+                            b.events
+                                .last()
+                                .map(|event| event.event.content.clone())
+                                .unwrap_or_default(),
+                        ));
+                        Some(resolved)
+                    }
+                    None => None,
+                };
                 match scope {
                     None => {
                         // No project authority and no operator fallback. This
@@ -3128,6 +3149,66 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            // Persist the turn to the memory sidecar. Successful turns only:
+            // a cancelled or errored turn is not a fact about the project, and
+            // writing one would teach the memory something that did not happen.
+            //
+            // Best effort and never fatal. The turn has already succeeded by
+            // the time this runs, so a failed write must not change its
+            // outcome. It is awaited rather than detached so a slow sidecar
+            // shows up as latency we can measure instead of unbounded
+            // background tasks that outlive the turn.
+            if let (Some(client), Some((scope, user_message))) =
+                (ctx.mastra_memory.as_ref(), mastra_write_scope.as_ref())
+            {
+                let transcript = agent.acp.take_turn_transcript();
+                if transcript.is_empty() {
+                    tracing::debug!(
+                        target: "mastra::write",
+                        session = %session_id,
+                        "turn produced no transcript — nothing to persist"
+                    );
+                } else {
+                    let write = crate::mastra_memory::MemoryWrite {
+                        user_message: user_message.clone(),
+                        agent_response: transcript.text.clone(),
+                        tool_events: transcript
+                            .tools
+                            .iter()
+                            .map(|(name, status)| crate::mastra_memory::ToolEvent {
+                                name: name.clone(),
+                                status: status.clone(),
+                                summary: None,
+                            })
+                            .collect(),
+                        metadata: None,
+                    };
+                    let outer = client.config().timeout + std::time::Duration::from_secs(1);
+                    match tokio::time::timeout(outer, client.remember(scope, &write)).await {
+                        Err(_) => tracing::warn!(
+                            target: "mastra::write",
+                            session = %session_id,
+                            timeout_ms = outer.as_millis() as u64,
+                            "memory write exceeded its outer bound — turn already succeeded"
+                        ),
+                        Ok(Err(error)) => tracing::warn!(
+                            target: "mastra::write",
+                            session = %session_id,
+                            error = %error,
+                            "memory write failed — turn already succeeded"
+                        ),
+                        Ok(Ok(_)) => tracing::info!(
+                            target: "mastra::write",
+                            session = %session_id,
+                            tools = transcript.tools.len(),
+                            response_chars = transcript.text.chars().count(),
+                            truncated = transcript.truncated,
+                            "persisted turn to sidecar memory"
+                        ),
+                    }
+                }
+            }
 
             send_prompt_result(
                 &result_tx,
