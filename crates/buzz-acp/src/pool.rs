@@ -3182,7 +3182,7 @@ pub async fn run_prompt_task(
                                 summary: None,
                             })
                             .collect(),
-                        metadata: None,
+                        metadata: serde_json::Map::new(),
                     };
                     let outer = client.config().timeout + std::time::Duration::from_secs(1);
                     match tokio::time::timeout(outer, client.remember(scope, &write)).await {
