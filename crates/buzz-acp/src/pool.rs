@@ -2720,7 +2720,7 @@ pub async fn run_prompt_task(
                         .and_then(|info| info.project.as_ref())
                         .map(|project| project.coordinate.as_str()),
                     client.config().fallback_project_id.as_deref(),
-                    &b.channel_id,
+                    &b.channel_id.to_string(),
                     &ctx.agent_keys.public_key().to_hex(),
                     &session_id,
                 );
