@@ -45,6 +45,9 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+
+    #[error("mastra memory config error: {0}")]
+    MastraMemory(#[from] crate::mastra_memory::MastraConfigError),
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -423,6 +426,57 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_MEMORY", conflicts_with = "memory")]
     pub no_memory: bool,
 
+    /// Enable the optional Mastra persistent project-memory sidecar.
+    ///
+    /// Off by default. This is a separate system from NIP-AE core memory
+    /// (`--memory`): core memory is the agent's own identity engram, while
+    /// Mastra memory is optional, project-scoped dynamic context retrieved per
+    /// turn. Enabling it requires `--mastra-memory-url`.
+    #[arg(long, env = "MASTRA_MEMORY_ENABLED", default_value_t = false)]
+    pub mastra_memory_enabled: bool,
+
+    /// Base URL of the Mastra memory sidecar, e.g. `http://127.0.0.1:4112`.
+    /// Required when `--mastra-memory-enabled` is set.
+    #[arg(long, env = "MASTRA_MEMORY_URL")]
+    pub mastra_memory_url: Option<String>,
+
+    /// Bearer token for the Mastra memory sidecar. Required unless the URL is
+    /// loopback, mirroring the sidecar's own rule. Never rendered in the config
+    /// summary or any `Debug` output.
+    #[arg(long, env = "MASTRA_MEMORY_AUTH_TOKEN", hide_env_values = true)]
+    pub mastra_memory_auth_token: Option<String>,
+
+    /// Per-request timeout, in seconds, for Mastra sidecar calls.
+    #[arg(
+        long,
+        env = "MASTRA_MEMORY_TIMEOUT_SECS",
+        default_value_t = crate::mastra_memory::DEFAULT_TIMEOUT_SECS
+    )]
+    pub mastra_memory_timeout_secs: u64,
+
+    /// Client-side ceiling on the token count of retrieved project context.
+    /// A response above this cap is discarded and the turn proceeds with no
+    /// injected memory.
+    ///
+    /// `hide_env_values` is set even though this value is a plain number: the
+    /// name contains "TOKENS", and `secret_env_args_hide_their_values_in_help`
+    /// matches the substring "TOKEN" deliberately. Satisfying that guard costs
+    /// nothing here, whereas adding an exception to it would put the burden of
+    /// being right on whoever names the next variable. Do not remove.
+    #[arg(
+        long,
+        env = "MASTRA_MEMORY_MAX_CONTEXT_TOKENS",
+        hide_env_values = true,
+        default_value_t = crate::mastra_memory::DEFAULT_MAX_CONTEXT_TOKENS
+    )]
+    pub mastra_memory_max_context_tokens: u32,
+
+    /// Operator-owned project id, used only for channels with no authoritative
+    /// NIP-MP project coordinate. Without it, such channels get no project
+    /// memory rather than falling back to a shared scope.
+    #[arg(long, env = "MASTRA_MEMORY_PROJECT_ID")]
+    pub mastra_memory_project_id: Option<String>,
+
     /// Disable the `<base>` platform-context section prepended to every prompt.
     /// When set, agents receive only the persona `<system>` prompt with no Buzz orientation.
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
@@ -576,6 +630,11 @@ pub struct Config {
     /// `<core-memory>` section. On by default; disabled via the
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY` opt-out.
     pub memory_enabled: bool,
+    /// Resolved Mastra sidecar configuration. `Some` only when
+    /// `--mastra-memory-enabled` is set and the supplied settings validate;
+    /// its presence is the enable flag for every downstream code path. Distinct
+    /// from `memory_enabled`, which governs NIP-AE core memory.
+    pub mastra_memory: Option<crate::mastra_memory::MastraMemoryConfig>,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
     /// Persisted effort level value (e.g. "high", "medium", "low"). Held as a
@@ -938,6 +997,28 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
+        // Resolve the optional Mastra sidecar before anything else can log the
+        // parsed args. The raw token is moved out and cleared with the same
+        // best-effort zeroize used for the private key above; from here on the
+        // only copy lives behind `RedactedSecret`.
+        let mastra_memory = if args.mastra_memory_enabled {
+            let mut raw_token = args.mastra_memory_auth_token.take();
+            let resolved = crate::mastra_memory::MastraMemoryConfig::resolve(
+                args.mastra_memory_url.take(),
+                raw_token.clone(),
+                args.mastra_memory_timeout_secs,
+                args.mastra_memory_max_context_tokens,
+                args.mastra_memory_project_id.take(),
+            )?;
+            if let Some(token) = raw_token.as_mut() {
+                token.replace_range(.., &"0".repeat(token.len()));
+                token.clear();
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
@@ -1184,6 +1265,7 @@ impl Config {
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
+            mastra_memory,
             model,
             effort_level: args.effort_level,
             session_title: args
@@ -1217,6 +1299,12 @@ impl Config {
             }
             other => format!("respond_to={other}"),
         };
+        // Never render the sidecar token; `MastraMemoryConfig::summary` is the
+        // only formatter allowed to touch that struct.
+        let mastra_memory_detail = match &self.mastra_memory {
+            Some(mastra) => format!(" mastra_memory=[{}]", mastra.summary()),
+            None => String::new(),
+        };
         let allowed_respond_to_detail = if self.allowed_respond_to.is_empty() {
             String::new()
         } else {
@@ -1225,7 +1313,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1249,6 +1337,7 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            mastra_memory_detail,
         )
     }
 }
@@ -1563,6 +1652,7 @@ mod tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: true,
+            mastra_memory: None,
             model: None,
             effort_level: None,
             session_title: None,

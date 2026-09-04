@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod mastra_memory;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -8920,6 +8921,7 @@ mod build_mcp_servers_tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
+            mastra_memory: None,
             model: None,
             effort_level: None,
             session_title: None,
@@ -9146,6 +9148,7 @@ mod error_outcome_emission_tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
+            mastra_memory: None,
             model: None,
             effort_level: None,
             session_title: None,
