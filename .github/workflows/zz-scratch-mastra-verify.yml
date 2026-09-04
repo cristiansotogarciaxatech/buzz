@@ -1,0 +1,27 @@
+name: scratch-mastra-baseline
+
+# Control run. Same Windows job as the feature branch, on the last commit that
+# contains NO Rust changes at all. If Windows fails here too, the failures are
+# the repo's on Windows and not something the memory work introduced.
+
+on:
+  push:
+    branches: [ci/mastra-baseline]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: buzz-acp tests (windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: |
+          rustup show
+          cargo --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: cargo test -p buzz-acp
+        run: cargo test -p buzz-acp --lib -- --test-threads=4
