@@ -373,6 +373,56 @@ impl ContextResponse {
             && self.channel_memory.trim().is_empty()
             && self.relevant_memories.is_empty()
     }
+
+    /// Render the three memory kinds as labelled prose for the prompt.
+    ///
+    /// Each kind is labelled because they carry different authority: project
+    /// memory is long-lived working state, channel memory is what happened in
+    /// this room, and recalled items are semantic hits that may be from an
+    /// unrelated thread. Collapsing them into one blob would invite the agent
+    /// to treat a loose semantic match as settled project state.
+    ///
+    /// Returns `None` when there is nothing to show, so the caller never
+    /// renders an empty labelled block.
+    pub fn render(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let mut parts: Vec<String> = Vec::with_capacity(3);
+        if !self.project_memory.trim().is_empty() {
+            parts.push(format!("Project memory:
+{}", self.project_memory.trim()));
+        }
+        if !self.channel_memory.trim().is_empty() {
+            parts.push(format!("This channel:
+{}", self.channel_memory.trim()));
+        }
+
+        let recalled: Vec<&str> = self
+            .relevant_memories
+            .iter()
+            .map(|m| m.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !recalled.is_empty() {
+            let items = recalled
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("
+");
+            parts.push(format!("Possibly related, from elsewhere in this project:
+{items}"));
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.join("
+
+"))
+    }
 }
 
 /// A tool invocation observed during a turn. Only the name and terminal status

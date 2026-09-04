@@ -756,6 +756,12 @@ impl ChannelInfoResolver {
 }
 
 pub struct PromptContext {
+    /// Bounded client for the optional Mastra memory sidecar.
+    ///
+    /// `None` whenever the integration is disabled, which is the default. The
+    /// prompt path treats absence and failure identically: the turn proceeds
+    /// with no memory block rather than being delayed or failed by it.
+    pub mastra_memory: Option<std::sync::Arc<crate::mastra_memory::MastraMemoryClient>>,
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
@@ -2686,10 +2692,115 @@ pub async fn run_prompt_task(
             );
         }
 
+        // Persistent memory from the optional Mastra sidecar.
+        //
+        // Fail-open by construction and bounded twice: the client carries its
+        // own per-request timeout, and the outer timeout also covers a client
+        // that never returns at all. Absence, timeout, transport failure, an
+        // over-budget response and an empty response all take the same branch,
+        // because a turn with no memory block is always safe and a turn
+        // delayed or failed by memory is not.
+        //
+        // Scope is derived only from values Buzz itself resolved: the relay
+        // host, the authoritative NIP-MP coordinate for this channel, the
+        // channel id, this agent's pubkey and the ACP session id. Nothing in
+        // it comes from message content, so no message can name a different
+        // community's memory and read it back.
+        let mastra_memory_block: Option<String> = match ctx.mastra_memory.as_ref() {
+            None => None,
+            Some(client) => {
+                let scope = crate::mastra_memory::MemoryScope::derive(
+                    &ctx.relay_url,
+                    channel_info
+                        .as_ref()
+                        .and_then(|info| info.project.as_ref())
+                        .map(|project| project.coordinate.as_str()),
+                    client.config().fallback_project_id.as_deref(),
+                    &b.channel_id,
+                    &ctx.agent_keys.public_key().to_hex(),
+                    &session_id,
+                );
+                match scope {
+                    None => {
+                        // No project authority and no operator fallback. This
+                        // is the normal state for an unlisted channel, not an
+                        // error: memory is project-scoped by design.
+                        tracing::debug!(
+                            target: "mastra::context",
+                            channel = %b.channel_id,
+                            "no project scope for this channel — skipping memory fetch"
+                        );
+                        None
+                    }
+                    Some(scope) => {
+                        let trigger = b
+                            .events
+                            .last()
+                            .map(|event| event.event.content.as_str())
+                            .unwrap_or_default();
+                        // Outer bound is the client timeout plus a small margin
+                        // so the client's own error path normally wins and the
+                        // outer arm only fires if the client itself hangs.
+                        let outer = client.config().timeout + std::time::Duration::from_secs(1);
+                        let fetch = client.context(&scope, trigger);
+                        match tokio::time::timeout(outer, fetch).await {
+                            Err(_) => {
+                                tracing::warn!(
+                                    target: "mastra::context",
+                                    channel = %b.channel_id,
+                                    timeout_ms = outer.as_millis() as u64,
+                                    "memory fetch exceeded its outer bound — prompting without memory"
+                                );
+                                None
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(
+                                    target: "mastra::context",
+                                    channel = %b.channel_id,
+                                    error = %error,
+                                    "memory fetch failed — prompting without memory"
+                                );
+                                None
+                            }
+                            Ok(Ok(context)) => {
+                                let cap = client.config().max_context_tokens;
+                                if context.estimated_tokens > cap {
+                                    // Refuse whole rather than trim. A trimmed
+                                    // block can cut mid-fact and read as a
+                                    // complete one, which is worse than none.
+                                    tracing::warn!(
+                                        target: "mastra::context",
+                                        channel = %b.channel_id,
+                                        estimated_tokens = context.estimated_tokens,
+                                        cap,
+                                        "memory context over budget — refusing it whole"
+                                    );
+                                    None
+                                } else {
+                                    let rendered = context.render();
+                                    if let Some(ref block) = rendered {
+                                        tracing::info!(
+                                            target: "mastra::context",
+                                            channel = %b.channel_id,
+                                            estimated_tokens = context.estimated_tokens,
+                                            block_len = block.len(),
+                                            "injected sidecar memory into the prompt"
+                                        );
+                                    }
+                                    rendered
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
                 agent_core: standing.agent_core,
+                mastra_memory: mastra_memory_block.as_deref(),
                 huddle_instructions: standing.huddle_instructions,
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
@@ -8659,6 +8770,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     ) -> PromptContext {
         use crate::relay::RestClient;
         PromptContext {
+            mastra_memory: None,
             mcp_servers: vec![],
             initial_message: None,
             idle_timeout: Duration::from_secs(60),

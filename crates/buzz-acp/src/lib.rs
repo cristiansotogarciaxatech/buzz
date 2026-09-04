@@ -2762,6 +2762,16 @@ async fn tokio_main() -> Result<()> {
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
+        // Build the sidecar client once. A construction failure here is a
+        // configuration error the operator asked for by enabling the
+        // integration, so it is loud rather than silently disabled.
+        mastra_memory: match config.mastra_memory.clone() {
+            Some(cfg) => Some(Arc::new(
+                crate::mastra_memory::MastraMemoryClient::new(cfg)
+                    .map_err(|e| anyhow::anyhow!("mastra memory client: {e}"))?,
+            )),
+            None => None,
+        },
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
