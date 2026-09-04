@@ -1,0 +1,62 @@
+name: scratch-mastra-verify
+
+# Throwaway verification workflow. This box has no MSVC linker and Windows
+# Application Control blocks freshly built test binaries, so the buzz-acp suite
+# cannot be run to completion locally. This runs it on real runners instead.
+# Not for any PR branch — delete with the scratch branch.
+#
+# Two platforms on purpose. Linux answers "is the code correct". Windows answers
+# "does it link and run on the machine this is actually for", which is the only
+# question that matters for a local personal build. A Linux-only green would
+# have told us nothing about the target platform.
+
+on:
+  push:
+    branches: [ci/mastra-memory-client]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: buzz-acp tests and clippy (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustup show
+          cargo --version
+          cargo clippy --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # Run the whole crate suite, not just the new module. A scoped pass would
+      # hide breakage outside its scope, and the point of this run is to find
+      # out whether the local failures are environmental.
+      - name: cargo test -p buzz-acp
+        run: cargo test -p buzz-acp --lib -- --test-threads=4
+
+      - name: cargo clippy -p buzz-acp
+        run: cargo clippy -p buzz-acp --all-targets -- -D warnings
+
+  windows:
+    name: buzz-acp tests (windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustup show
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: cargo test -p buzz-acp
+        run: cargo test -p buzz-acp --lib -- --test-threads=4
