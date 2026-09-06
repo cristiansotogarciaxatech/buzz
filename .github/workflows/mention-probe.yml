@@ -9,14 +9,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: main-3c7f288c
-            ref: 3c7f288c60d67df78577b237e27c3dfc8831aaa1
-          - label: pr3917-322611de
-            ref: 322611debb68c02011f2968ae29f96f9d45561cc
-          - label: pr5932-32fcbd0f
-            ref: 32fcbd0f98339aef8cf2c71940c965bf27ca12e3
-          - label: pr2684-3128593d
-            ref: 3128593d7703d0f54e04c9158e9ef23e3af7c2ba
           - label: pr2547-0a39d45d
             ref: 0a39d45d747b17be93d40269895cbc7dd4a7c3f5
     steps:
@@ -58,6 +50,7 @@ jobs:
                           extract_at_names(input)
                       );
                   }
+                  println!("PROBE lead_star={} lead_us={} wb_star={}", is_mention_lead_at("*@x", 1), is_mention_lead_at("_@x", 1), is_word_boundary("** hi"));
                   println!(
                       "PROBE charprops feff_ws={} feff_alnum={} nbsp_ws={} nbsp_ascii_ws={} zwsp_ws={}",
                       '\u{feff}'.is_whitespace(),
@@ -81,7 +74,9 @@ jobs:
           open(p, 'w', encoding='utf-8', newline='\n').write(out)
           print('probe inserted')
           PY
-          grep -c zzz_bom_probe crates/buzz-sdk/src/mentions.rs
+          grep -n zzz_bom_probe crates/buzz-sdk/src/mentions.rs
+          echo "--- context around insertion ---"
+          grep -n "mod tests\|^}" crates/buzz-sdk/src/mentions.rs | tail -8
 
       - name: Run probe
         run: |
