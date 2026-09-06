@@ -9,8 +9,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - label: main-3c7f288c
+            ref: 3c7f288c60d67df78577b237e27c3dfc8831aaa1
           - label: pr2547-0a39d45d
             ref: 0a39d45d747b17be93d40269895cbc7dd4a7c3f5
+          - label: pr2684-3128593d
+            ref: 3128593d7703d0f54e04c9158e9ef23e3af7c2ba
+          - label: pr5932-32fcbd0f
+            ref: 32fcbd0f98339aef8cf2c71940c965bf27ca12e3
+          - label: pr3917-322611de
+            ref: 322611debb68c02011f2968ae29f96f9d45561cc
     steps:
       - name: Fetch block/buzz at ${{ matrix.ref }}
         run: |
@@ -20,7 +28,7 @@ jobs:
           git remote add origin https://github.com/block/buzz.git
           git fetch -q --depth 1 origin ${{ matrix.ref }}
           git checkout -q FETCH_HEAD
-          echo "HEAD is $(git rev-parse HEAD)"
+          echo "PROBEHEAD $(git rev-parse HEAD)"
           test "$(git rev-parse HEAD)" = "${{ matrix.ref }}"
 
       - name: Append probe test to buzz-sdk mentions.rs
@@ -32,16 +40,19 @@ jobs:
           src = open(p, encoding='utf-8').read()
           probe = r'''
               #[test]
-              fn zzz_bom_probe() {
-                  let known = ["Scout"];
-                  let cases: [(&str, &str); 7] = [
-                      ("bare_start", "@Scout hi"),
-                      ("bom_start", "\u{feff}@Scout hi"),
-                      ("bold_start", "**@Scout** hi"),
-                      ("nbsp_start", "\u{a0}@Scout hi"),
-                      ("zwsp_start", "\u{200b}@Scout hi"),
-                      ("bom_after_newline", "line one\n\u{feff}@Scout hi"),
-                      ("bom_then_space", "\u{feff} @Scout hi"),
+              fn zzz_boundary_probe() {
+                  let known = ["Scout", "Will Pfleger"];
+                  let cases: [(&str, &str); 10] = [
+                      ("plain", "@Scout hi"),
+                      ("bom_lead", "\u{feff}@Scout hi"),
+                      ("bold_wrap", "**@Scout** hi"),
+                      ("nbsp_lead", "\u{a0}@Scout hi"),
+                      ("zwsp_lead", "\u{200b}@Scout hi"),
+                      ("bom_after_nl", "line one\n\u{feff}@Scout hi"),
+                      ("paren", "(@Scout) hi"),
+                      ("cjk_adjacent", "\u{4ea4}\u{7ed9}@Scout\u{5904}\u{7406}"),
+                      ("bold_multiword", "**@Will Pfleger** hi"),
+                      ("email_negctl", "mail user@Scout.com here"),
                   ];
                   for (label, input) in cases {
                       println!(
@@ -50,7 +61,6 @@ jobs:
                           extract_at_names(input)
                       );
                   }
-                  println!("PROBE lead_star={} lead_us={} wb_star={}", is_mention_lead_at("*@x", 1), is_mention_lead_at("_@x", 1), is_word_boundary("** hi"));
                   println!(
                       "PROBE charprops feff_ws={} feff_alnum={} nbsp_ws={} nbsp_ascii_ws={} zwsp_ws={}",
                       '\u{feff}'.is_whitespace(),
@@ -60,26 +70,27 @@ jobs:
                       '\u{200b}'.is_whitespace()
                   );
                   // Positive control: the plain case must resolve on every ref.
-                  // If this fails the harness is wrong, not the parser.
                   assert_eq!(
                       extract_at_mentions_with_known("@Scout hi", &known),
                       vec!["scout".to_string()]
+                  );
+                  // Negative control: an email address must stay inert on every ref.
+                  assert!(
+                      extract_at_mentions_with_known("mail user@Scout.com here", &known).is_empty()
                   );
               }
           '''
           i = src.rstrip().rfind('\n}')
           assert i > 0, 'could not find closing brace of tests module'
           out = src[:i] + '\n' + probe + '}\n'
-          assert 'zzz_bom_probe' in out
+          assert 'zzz_boundary_probe' in out
           open(p, 'w', encoding='utf-8', newline='\n').write(out)
           print('probe inserted')
           PY
-          grep -n zzz_bom_probe crates/buzz-sdk/src/mentions.rs
-          echo "--- context around insertion ---"
-          grep -n "mod tests\|^}" crates/buzz-sdk/src/mentions.rs | tail -8
+          grep -n zzz_boundary_probe crates/buzz-sdk/src/mentions.rs
 
       - name: Run probe
         run: |
           set -euo pipefail
           cd tree
-          cargo test -p buzz-sdk --lib zzz_bom_probe -- --nocapture
+          cargo test -p buzz-sdk --lib zzz_boundary_probe -- --nocapture
